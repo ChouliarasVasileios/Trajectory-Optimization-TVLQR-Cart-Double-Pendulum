@@ -17,7 +17,7 @@ N = 6
 M = 1
 
 # Total simulation time
-tf = 5.0
+tf = 15.0
 
 # Total Knot points of the simulation
 K = round(tf/dt) + 1 # 101
@@ -31,7 +31,7 @@ x_dim = K * N + (K - 1) * M
 eq_dim = (K - 1) * N +2 * N
 
 # Initial state
-x_init = np.array([0.,np.pi,np.pi,0.,0.,0.]) # shape : (N,)
+x_init = np.array([2.,np.pi,np.pi,0.,0.,0.]) # shape : (N,)
 
 # Final state
 x_target = np.array([0.,0.,0.,0.,0.,0.]) # shape : (N,)
@@ -46,16 +46,15 @@ dynamics = lambda x, u : model.dynamics(x.reshape((N,1)),u.reshape((M,1))).resha
 
 # Objective function variables
 
-# Gains of the 13 attempt
 # The Weight matrix of state
-Q = 0.05*np.eye(N)
+Q = 0.2*np.eye(N)
 
 # The Weight matrix of actions
 R = 0.5*np.eye(M)
 
 
 # Let's evaluate the jacobians with finite differences
-def finite_diff(f, z, M_dim, eps = 1e-9):
+def finite_diff(f, z, M_dim, eps = 1e-6):
     N_dim = z.shape[0]
     jac = np.zeros((M_dim, N_dim))
     for i in range(N_dim):
@@ -109,7 +108,7 @@ class TrajOpt:
         # Calculating the action derivative of the objective function
         # Initializing it from the ground up
         for i in range((K - 1)* M -1,-1,-1):
-            grand[i,:] = R @ u_controls[i]
+            grand[K * N + i,:] = R @ u_controls[i] # action entries start after the K*N state entries
 
         return grand.reshape(np.shape(grand)[0],) # Returning the gradient vector | shape: (eq_dim,)
 
@@ -121,7 +120,7 @@ class TrajOpt:
         c = np.zeros((eq_dim,))
 
         # Iterate K-2 times to pass through all the sequential states and action
-        for k in range(K-2):
+        for k in range(K-1): # includes the last step x_{K-2} -> x_{K-1}
             
             # Sequential states
             x0 = x[k * N : (k + 1) * N]
@@ -129,7 +128,8 @@ class TrajOpt:
             
             # Sequential actions
             u = x[K * N + k * M : K * N + k * M + M]
-            u1 = x[K * N + (k + 1) * M : K * N + (k + 1) * M + M]
+            k1 = min(k + 1, K - 2) # there is no u_{K-1}, so the last step reuses u_{K-2}
+            u1 = x[K * N + k1 * M : K * N + k1 * M + M]
             
             # Setting up the constrain for the next state to be matched
             # x1 : is the reference state that generated
@@ -165,7 +165,7 @@ class TrajOpt:
         J = np.zeros((eq_dim, x_dim))
         
         # Iterate K-2 times to pass through all the sequential states and action
-        for k in range(K-2):
+        for k in range(K-1): # includes the last step x_{K-2} -> x_{K-1}
             
             # Sequential states
             x0 = x[k * N : (k + 1) * N]
@@ -173,7 +173,8 @@ class TrajOpt:
             
             # Sequential actions
             u0 = x[K * N + k * M : K * N + k * M + M]
-            u1 = x[K * N + (k + 1) * M : K * N + (k + 1) * M + M]
+            k1 = min(k + 1, K - 2) # there is no u_{K-1}, so the last step reuses u_{K-2}
+            u1 = x[K * N + k1 * M : K * N + k1 * M + M]
             
             
             # Dynamics of the model with respect to state, with constant action = u0
@@ -226,13 +227,13 @@ class TrajOpt:
                     J[k * N + n, (k + 1) * N + d] -= dX_1[n,d] *(dt/2) 
                 
                 # wrt x0 -1 adding the diagonal term (-I6) for df_dx0
-                J[k * N + n, k * N + n] = -1.
+                J[k * N + n, k * N + n] -= 1. # add -I6 to the -dX_0*dt/2 diagonal (not overwrite it)
                 
                 # wrt u0, df_du0
                 J[k * N + n, K * N + k * M : K * N + k * M + M] = -dU_0[n, :] * (dt/2)
                 
                 # wrt u1, df_du1
-                J[k * N + n, K * N + k * M + M : K * N + k * M + 2*M] = -dU_1[n, :] * (dt/2)
+                J[k * N + n, K * N + k1 * M : K * N + k1 * M + M] += -dU_1[n, :] * (dt/2) # += : on the last step u1 is u0
                 
         # The last to states of the jacobian matrix of equality constrains
         si = eq_dim - 2 * N
@@ -257,69 +258,69 @@ class TrajOpt:
 def main():
     
     # 1********** Uncomment to see live result ***********************************************************
-    # # Initializing the decision variable with zeros
-    # x0 = np.zeros((x_dim,))
+    # Initializing the decision variable with zeros
+    x0 = np.zeros((x_dim,))
 
-    # # Setting a guessed trajectory to warm up the solver
-    # for k in range(K):
+    # Setting a guessed trajectory to warm up the solver
+    for k in range(K):
         
-    #     # Weight of the state
-    #     alpha = k / (K - 1)
+        # Weight of the state
+        alpha = k / (K - 1)
         
-    #     # Next state is a weight to initial and final state
-    #     # e.g close to initial state then the next state difference more from target than initial.
-    #     x0[k * N : (k + 1) * N] = (1 - alpha) * x_init + alpha * x_target
+        # Next state is a weight to initial and final state
+        # e.g close to initial state then the next state difference more from target than initial.
+        x0[k * N : (k + 1) * N] = (1 - alpha) * x_init + alpha * x_target
     
-    # # Setting up the guessed control for its knot point in trajectory
-    # # We set them to be zero
-    # for k in range(K - 1):
-    #     x0[K * N + k * M : K * N + k * M + M] = 0.
+    # Setting up the guessed control for its knot point in trajectory
+    # We set them to be zero
+    for k in range(K - 1):
+        x0[K * N + k * M : K * N + k * M + M] = 0.
 
-    # # Setting the lower and upper bound of the decision variable.
+    # Setting the lower and upper bound of the decision variable.
     
-    # # No limits for its state in decision variable
-    # lb = [None] * x_dim
-    # ub = [None] * x_dim
+    # No limits for its state in decision variable
+    lb = [None] * x_dim
+    ub = [None] * x_dim
 
-    # # Add u bounds
-    # max_control_force :float = 20.0
-    # for k in range(K - 1):
-    #     lb[K * N + k * M : K * N + k * M + M] = [-max_control_force for _ in range(M)]
-    #     ub[K * N + k * M : K * N + k * M + M] = [max_control_force for _ in range(M)]
+    # Add u bounds
+    max_control_force :float = 20.0
+    for k in range(K - 1):
+        lb[K * N + k * M : K * N + k * M + M] = [-max_control_force for _ in range(M)]
+        ub[K * N + k * M : K * N + k * M + M] = [max_control_force for _ in range(M)]
 
-    # # All constraints are equality constraints
-    # # Setting to zero cause we want the reference match the prediction from trapezoidal rule
-    # cl = [0.] * eq_dim
-    # cu = [0.] * eq_dim
-
-
-    # # Setting up the optimizer 
-    # nlp = cyipopt.Problem(n=len(x0), m=len(cl), problem_obj=TrajOpt(), lb=lb, ub=ub, cl=cl, cu=cu)
-
-    # # nlp.add_option('jacobian_approximation','finite-difference-values')
-    # nlp.add_option('tol', 1e-4) # Convergence tolerance 
-    # nlp.add_option('max_iter', 1000) # Maximum number of iterations
-    # nlp.add_option("print_level", 3)
-    # nlp.add_option("nlp_scaling_method", "none")
+    # All constraints are equality constraints
+    # Setting to zero cause we want the reference match the prediction from trapezoidal rule
+    cl = [0.] * eq_dim
+    cu = [0.] * eq_dim
 
 
-    # # Solve the problem
-    # x, info = nlp.solve(x0)
+    # Setting up the optimizer 
+    nlp = cyipopt.Problem(n=len(x0), m=len(cl), problem_obj=TrajOpt(), lb=lb, ub=ub, cl=cl, cu=cu)
+
+    nlp.add_option('jacobian_approximation','finite-difference-values')
+    nlp.add_option('tol', 1e-4) # Convergence tolerance 
+    nlp.add_option('max_iter', 2000) # Maximum number of iterations
+    nlp.add_option("print_level", 3)
+    nlp.add_option("nlp_scaling_method", "none")
+
+
+    # Solve the problem
+    x, info = nlp.solve(x0)
     
     # 1********************************************************************************************************
     
     
     # 2******* Uncomment to save the file *********************************************************************
     # Saving the solution to a txt file
-    # np.savetxt('arrayNew.txt', x, fmt='%1.2f', delimiter=', ')
+    np.savetxt('arrayNew.txt', x, fmt='%1.2f', delimiter=', ')
     # 2********************************************************************************************************
 
 
     # Loading from existing file the optimized vector
     
     # 3********** Uncomment to see ready example ***************************************************************
-    loaded_array = np.loadtxt('array13.txt', delimiter=',')
-    x = np.copy(loaded_array)
+    # loaded_array = np.loadtxt('array13.txt', delimiter=',')
+    # x = np.copy(loaded_array)
     # 3*********************************************************************************************************
     
 
@@ -328,13 +329,13 @@ def main():
     fig = plt.figure()
     ax = fig.add_subplot(1, 1, 1)
 
-    # ax.plot([k * dt for k in range(K)], [x[k * N + 0] for k in range(K)], label="x")
-    # ax.plot([k * dt for k in range(K)], [x[k * N + 1] for k in range(K)], label="θ1")
-    # ax.plot([k * dt for k in range(K)], [x[k * N + 2] for k in range(K)], label="θ2")
+    ax.plot([k * dt for k in range(K)], [x[k * N + 0] for k in range(K)], label="x")
+    ax.plot([k * dt for k in range(K)], [x[k * N + 1] for k in range(K)], label="θ1")
+    ax.plot([k * dt for k in range(K)], [x[k * N + 2] for k in range(K)], label="θ2")
 
-    # ax.plot([k * dt for k in range(K)], [x[k * N + 3] for k in range(K)], label="$\dot{x}$")
-    # ax.plot([k * dt for k in range(K)], [x[k * N + 4] for k in range(K)], label="$\dot{θ1}$")
-    # ax.plot([k * dt for k in range(K)], [x[k * N + 5] for k in range(K)], label="$\dot{θ2}$")
+    ax.plot([k * dt for k in range(K)], [x[k * N + 3] for k in range(K)], label="$\dot{x}$")
+    ax.plot([k * dt for k in range(K)], [x[k * N + 4] for k in range(K)], label="$\dot{θ1}$")
+    ax.plot([k * dt for k in range(K)], [x[k * N + 5] for k in range(K)], label="$\dot{θ2}$")
 
     ax.plot([k * dt for k in range(K - 1)], [x[K * N + k * M + 0] for k in range(K - 1)], label="u")
 
